@@ -84,11 +84,6 @@ button.icon.sm { width: 26px; }
 .badge.warn { background: var(--warn-soft); border-color: var(--warn-bd); color: var(--warn); }
 .badge.bad { background: var(--danger-soft); border-color: var(--danger-bd); color: var(--danger); }
 .badge.brand { background: var(--primary-soft); border-color: var(--primary-bd); color: var(--primary-fg); }
-
-/* 版本标签：固定配色，国内版附带签到入口 */
-.badge.edition-cn { background: var(--cn-soft); border-color: var(--cn-bd); color: var(--cn); }
-.badge.edition-intl { background: var(--intl-soft); border-color: var(--intl-bd); color: var(--intl); }
-
 /* 行内状态标签：比徽章更方、更小 */
 .badge.tag { min-height: 19px; padding: 0 8px; border-radius: var(--r-xs); font-size: 11px; }
 .badge.tag.ok { background: var(--ok-soft); border-color: var(--ok-bd); color: var(--ok); }
@@ -168,27 +163,6 @@ button.icon.sm { width: 26px; }
 
 .hint strong, .detail strong { color: var(--text); }
 
-/* 提示条 */
-.banner {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 11px 13px;
-  border: 1px solid var(--info-bd);
-  border-radius: var(--r-md);
-  background: var(--info-soft);
-  color: var(--text-2);
-  font-size: 12px;
-  line-height: 1.65;
-}
-
-.banner .ico { flex: 0 0 auto; color: var(--info); font-size: 13px; line-height: 1.5; }
-.banner.warn { border-color: var(--warn-bd); background: var(--warn-soft); }
-.banner.warn .ico { color: var(--warn); }
-.banner.danger { border-color: var(--danger-bd); background: var(--danger-soft); }
-.banner.danger .ico { color: var(--danger); }
-.banner strong { color: var(--text); }
-
 /* ─── 空状态 ─── */
 .empty {
   padding: 30px 16px;
@@ -231,6 +205,9 @@ button.icon.sm { width: 26px; }
 
 #toast.ok { border-color: var(--ok-bd); color: var(--ok); }
 #toast.err { border-color: var(--danger-bd); color: var(--danger); }
+/* 警告（不是失败）：如 AutoClaw 网页登录抢不到官方登记端口时的降级提示 ——
+   那一轮仍能登（内嵌窗口），只是「系统浏览器」方式会收不到回调。 */
+#toast.warn { border-color: var(--warn-bd); color: var(--warn); }
 
 /* ─── 表单控件 ─── */
 input[type="text"],
@@ -299,37 +276,6 @@ input[type="number"] { max-width: 130px; }
 
 .field-row > label { color: var(--text-2); font-size: 12.5px; white-space: nowrap; }
 
-/* 输入框 + 前后缀（affix 的左偏移与 input 自身 10px 内边距对齐） */
-.input-affix { position: relative; display: flex; align-items: center; flex: 1 1 auto; }
-.input-affix .affix { position: absolute; left: 10px; color: var(--text-3); font-size: 12px; pointer-events: none; }
-.input-affix input { padding-left: 28px; }
-
-/* ─── 单选卡片（账号版本 / 代理模式） ─── */
-.edition-option {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 6px 13px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--surface);
-  color: var(--text-2);
-  font-size: 12.5px;
-  cursor: pointer;
-  user-select: none;
-  transition: border-color .15s ease, background .15s ease, color .15s ease;
-}
-
-.edition-option:hover { border-color: var(--border-strong); background: var(--surface-3); }
-.edition-option input { accent-color: var(--primary); margin: 0; }
-
-.edition-option:has(input:checked) {
-  border-color: var(--primary-bd);
-  background: var(--primary-soft);
-  color: var(--primary-fg);
-  font-weight: 600;
-}
-
 /* ─── 复选 / 单选 ─── */
 .check, .radio {
   display: inline-flex;
@@ -385,93 +331,6 @@ input[type="number"] { max-width: 130px; }
 .switch input:checked + .track::after { transform: translateX(15px); }
 .switch input:focus-visible + .track { box-shadow: var(--ring); }
 .switch input:disabled + .track { opacity: .5; }
-
-/* 开关卡片：整行可点，附说明 */
-.switch-card {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--surface-inset);
-}
-
-.switch-card .switch { color: var(--text); font-weight: 500; }
-.switch-card .desc { color: var(--text-3); font-size: 11.5px; }
-.switch-card.stack { flex-direction: column; align-items: stretch; gap: 10px; }
-
-/* 带 time 控件的 .switch：内部不是开关，要覆盖上面的隐藏处理 */
-.switch-time { gap: 9px; cursor: default; }
-
-.switch-time input[type="time"] {
-  position: static;
-  width: auto;
-  height: 28px;
-  opacity: 1;
-  pointer-events: auto;
-}
-
-/* 分段控件（账号页筛选）：槽取 --control-* 一组，与按钮同源 ——
-   它现在坐在内容表面上，需要靠自身填充而不是反衬底色来立住。 */
-.seg {
-  display: inline-flex;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--control-border);
-  border-radius: var(--r-md);
-  background: var(--control-bg);
-}
-
-/* 分段项嵌在 .seg 里，圆角要按「外圆角 - 内边距」收一号，
-   否则 24px 的项配上控制件的 12.8px 会比容器还圆，接缝处露出毛边 */
-.seg-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 24px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: var(--r-sm);
-  background: transparent;
-  box-shadow: none;
-  color: var(--text-2);
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
-  transition: background .15s ease, color .15s ease;
-}
-
-/* 未选中项用中性叠加：深色叠白、浅色叠黑，同一行声明两边都成立 */
-.seg-item:hover:not(:disabled) { background: var(--nav-hover); color: var(--text); }
-
-/* 选中项走品牌浅底，与导航选中态、单选卡片保持一致 */
-.seg-item.active {
-  background: var(--primary-soft);
-  color: var(--primary-fg);
-  font-weight: 600;
-}
-
-.seg-item .seg-count {
-  min-width: 16px;
-  padding: 0 5px;
-  border-radius: var(--r-pill);
-  background: var(--surface-3);
-  color: var(--text-3);
-  font-size: 10.5px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
-  opacity: 1;
-}
-
-.seg-item.active .seg-count { background: color-mix(in srgb, var(--primary) 16%, transparent); color: var(--primary-fg); }
-
-/* 计数为 0 的分段弱化，减少视觉噪音 */
-.seg-item.zero:not(.active) { opacity: .45; }
-.seg-item:disabled { cursor: not-allowed; opacity: .4; }
-.seg-item.active:disabled { opacity: .7; }
-
 /* 工具条：一行收住筛选与主操作 */
 .toolbar {
   display: flex;
@@ -491,17 +350,6 @@ input[type="number"] { max-width: 130px; }
 @media (max-width: 1120px) {
   .toolbar .actions { flex-basis: 100%; margin-left: 0; }
 }
-
-/* 提供商筛选下拉：它决定列表里显示哪些家的账号，
-   比同排普通下拉重一档，边框取强调色而不是用字重硬顶 */
-.model-select {
-  max-width: 200px;
-  height: 30px;
-  border-color: var(--border-strong);
-  background-color: var(--surface);
-  font-weight: 600;
-}
-
 /* ─── 进度条 ─── */
 .progress {
   height: 6px;
@@ -516,112 +364,38 @@ input[type="number"] { max-width: 130px; }
   background: var(--primary);
   transition: width .3s ease;
 }
+/* 确认弹窗曾是「弹窗之上的弹窗」：它从别的弹窗里发起（请求详情的「终止请求」、
+   账号设置的「删除提供商」、⋯ 菜单的「删除账号」…），而所有 .modal-mask 同为
+   30 —— 同档时谁在上面由 DOM 顺序决定，声明在后面的弹窗会把确认框盖住：
+   用户点了「终止请求」，界面看起来毫无反应，实际确认框在底下等着。
+   所以要抬到浮层（下拉 / 列设置 / 提示气泡，35）之上、轻提示（toast，40）之下。
 
-/* ─── 弹窗 ─── */
-/* 遮罩要「两个主题都压暗背景」，但令牌里没有这样的颜色：--text、--bg、--surface
-   都随主题翻转，拿它们当蒙层会在深色模式刷出一层白雾。所以按 tokens.css 里
-   浅色 tint 同款手法派生，只把基底换成黑，深浅两模式的方向就一致了。 */
-.modal-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 30;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  background: color-mix(in srgb, black 46%, transparent);
-  backdrop-filter: blur(3px);
-}
+   那条规则（#confirm-modal { z-index: 38 }
 
-.modal-mask.open { display: flex; animation: mask-in .16s ease; }
+）随弹窗迁到组件库一并移除了：
+   现在是 ui-kit 的 AlertDialogContent 自带 z-38（见 ui-kit/src/alert-dialog.tsx），
+   层级口径不变，只是不再由这里管。 */
 
 @keyframes mask-in { from { opacity: 0; } to { opacity: 1; } }
-
-.modal {
-  display: flex;
-  flex-direction: column;
-  width: min(620px, 100%);
-  max-height: 100%;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  background: var(--surface);
-  box-shadow: var(--shadow-3);
-  overflow: hidden;
-  animation: modal-in .2s cubic-bezier(.2, .9, .3, 1);
-}
-
 @keyframes modal-in {
   from { opacity: 0; transform: translateY(10px) scale(.985); }
   to { opacity: 1; transform: none; }
 }
-
-.modal-head {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 15px 20px;
-  border-bottom: 1px solid var(--hairline);
-}
-
-.modal-head h2 { flex: 1 1 auto; font-size: 14.5px; font-weight: 650; }
-
-/* 关闭按钮是透明底图标钮，圆角沿用 button 的 --r-md */
-.modal-head > button {
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border-color: transparent;
-  background: transparent;
-  box-shadow: none;
-  color: var(--text-3);
-}
-
-.modal-head > button:hover { background: var(--surface-3); border-color: transparent; color: var(--text); }
-
-.modal-body {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  padding: 18px 20px;
-  overflow-y: auto;
-}
-
-.modal-section {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--surface-inset);
-}
-
-.modal-section h3 { font-size: 12.5px; font-weight: 650; }
-.modal-section p { color: var(--text-2); font-size: 12px; line-height: 1.65; }
-
-.modal-foot {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 13px 20px;
-  border-top: 1px solid var(--hairline);
-  background: var(--surface-2);
-}
-
-.modal-foot .spacer { flex: 1 1 auto; }
-
-/* 说明性小字（弹窗内） */
-.modal .detail { color: var(--text-3); font-size: 11.5px; }
-
 /* ─── 表格列宽拖动把手 ───
    四张表的表头右缘共用这一枚把手（账号表由 accounts-columns.js 委托，
    模型管理 / 网关 Key / 请求日志由 table-columns.js 委托）：
-   平时隐形，悬停浮出 1px 竖线，按住时变主色加粗。
-   靠绝对定位挂在宿主单元格上，所以宿主必须是定位元素 —— 四张表的表头单元格
-   都是 position: sticky，本来就是，不需要额外声明。
+   常驻一枚 1px 竖线标出可拖的列边界（实时调列宽不必先悬停摸索），
+   按住时变主色加粗。
+   靠绝对定位挂在宿主单元格上，所以宿主必须是定位元素 —— 三张 table 表的
+   表头是 position: sticky（本来就是），请求日志的表头格也单独声明了 relative。
    right: -4px 让竖线正好压住列边界；代价是最后一列不能插把手（钉在表格右缘
-   会顶出滚动容器），这一条由各自的脚本负责。 */
+   会顶出滚动容器），这一条由各自的脚本负责（请求日志是网格布局、整行填满
+   不滚动，末列照插）。
+
+   竖线不随宿主撑满、改定高 20px 垂直居中：四张表的宿主高度参差 —— 账号表
+   th 行高 32px（眼睛按钮撑起行盒），32 − 上下各 6px 恰是 20px；模型/网关
+   th 上下内边距各多 1px；请求日志的宿主格只有一行字高（~17px），按撑满算
+   只剩几像素。定高才保证四条分隔线一样长，20px 即以账号页为准。 */
 .col-grip {
   position: absolute;
   top: 0;
@@ -636,60 +410,14 @@ input[type="number"] { max-width: 130px; }
   content: "";
   position: absolute;
   left: 4px;
-  top: 6px;
-  bottom: 6px;
+  top: 50%;
+  height: 20px;
+  transform: translateY(-50%);
   width: 1px;
   background: var(--border-strong);
-  opacity: 0;
-  transition: opacity .12s;
 }
 
-/* 悬停显形：宿主有的是 th，有的是请求日志表头里的 span，所以按「直接父级」匹配 */
-:hover > .col-grip::after { opacity: 1; }
-.col-grip.active::after { left: 3.5px; width: 2px; background: var(--primary); opacity: 1; }
+.col-grip.active::after { left: 3.5px; width: 2px; background: var(--primary); }
 
 /* 拖动中：全局换光标并禁用选中（拖过文本会触发原生的拖选，把手就「断」了） */
 body.col-resizing { cursor: col-resize; user-select: none; }
-
-/* 表格列设置（浮层与列对齐）在 css/table-col-settings.css ——
-   它必须排在页面样式之后（要盖过各表写死的默认对齐），所以独立成一层，
-   与 select.css / tooltip.css 同一编排。 */
-
-/* ─── 页面级分段布局辅助 ─── */
-/* 端点卡片（网关页 / 设置页） */
-.endpoint-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-  gap: 10px;
-}
-
-.endpoint {
-  min-width: 0;
-  padding: 12px 13px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--surface-inset);
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-
-.endpoint .k { color: var(--text-3); font-size: 11.5px; }
-
-.endpoint .v {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-}
-
-.endpoint .v .url {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.5;
-  word-break: break-all;
-}
-
-.endpoint.accent { background: var(--primary-soft); border-color: var(--primary-bd); }

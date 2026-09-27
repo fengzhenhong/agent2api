@@ -28,7 +28,8 @@
 
 use serde_json::Value;
 
-use super::protocol::{classify_upstream_error, THINK_TAGS, UpstreamKind};
+use super::errors::{classify_upstream_error, QueueInfo, UpstreamKind};
+use super::protocol::THINK_TAGS;
 
 /// 上游 SSE 里解析出的一条事件（源实现 `parseSseLine` 的返回联合）
 pub enum SseEvent {
@@ -42,7 +43,7 @@ pub enum SseEvent {
     Error {
         /// 信封里的业务状态码（**不是** HTTP 状态码 —— 那一个始终是 200）
         status: u16,
-        /// 分类结果（决定「换账号 / 刷新重试 / 原样透传」）
+        /// 分类结果（决定「换账号 / 刷新重试 / 排队退避 / 原样透传」）
         kind: UpstreamKind,
         /// 上游原文（截断后）
         raw: String,
@@ -50,6 +51,8 @@ pub enum SseEvent {
         message: String,
         /// 额度类错误带出的定价页链接
         pricing_url: Option<String>,
+        /// 排队信号（`kind == Queued` 时有值）
+        queue: Option<QueueInfo>,
     },
 }
 
@@ -81,6 +84,7 @@ pub fn parse_sse_line(data: &str) -> SseEvent {
                 raw: raw.chars().take(500).collect(),
                 message: classified.message,
                 pricing_url: classified.pricing_url,
+                queue: classified.queue,
             };
         }
     }
@@ -164,6 +168,16 @@ impl LineBuffer {
             }
         }
         Vec::new()
+    }
+
+    /// 取走尚未凑成完整行的缓冲字节（**不**当作一行解析）。
+    ///
+    /// 供首帧预读（`piping::prefetch_stream_head`）移交用：预读消费了缓冲，
+    /// `tail` 里可能留着下一条帧的前半（`data: {"statusCodeValue"...` 被
+    /// 网络分片截断的那半）。接管的 `drive_stream` 会新建自己的 LineBuffer，
+    /// 没有这段字节那一条帧就永远拼不回来 —— 调用方把它拼回流头即可无缝续传。
+    pub fn take_tail(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.tail)
     }
 }
 

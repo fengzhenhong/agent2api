@@ -7,7 +7,7 @@
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_dialog::DialogExt;
 
@@ -390,8 +390,9 @@ pub fn save_app_settings(app: AppHandle, patch: AppSettings) -> Result<AppSettin
 
 /// 导出账号：拉取导出数据，弹系统保存框落盘。
 ///
-/// 账号数为 0 时直接返回，不弹保存框 —— 让用户选完路径再被告知「没东西可存」
-/// 是纯打扰。
+/// 账号与自定义提供商定义**都为 0** 时直接返回，不弹保存框 —— 让用户选完
+/// 路径再被告知「没东西可存」是纯打扰。只有定义没有账号（或反之）仍值得导：
+/// 导出文件现在同时承载两层（v2 起带 `customProviders` 段）。
 #[tauri::command]
 pub async fn export_accounts(app: AppHandle) -> Result<Value, String> {
     let data = gateway::call("GET", "/api/accounts/export", None).await?;
@@ -400,7 +401,12 @@ pub async fn export_accounts(app: AppHandle) -> Result<Value, String> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    if accounts.is_empty() {
+    let custom_providers = data
+        .get("customProviders")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if accounts.is_empty() && custom_providers.is_empty() {
         return Ok(json!({ "count": 0 }));
     }
 
@@ -424,13 +430,19 @@ pub async fn export_accounts(app: AppHandle) -> Result<Value, String> {
     let text = serde_json::to_string_pretty(&data)
         .map_err(|error| format!("导出内容序列化失败: {error}"))?;
     std::fs::write(&path, text.as_bytes()).map_err(|error| format!("写入账号文件失败: {error}"))?;
-    Ok(json!({ "count": accounts.len(), "file": path.to_string_lossy() }))
+    Ok(json!({
+        "count": accounts.len(),
+        "customProviders": custom_providers.len(),
+        "file": path.to_string_lossy(),
+    }))
 }
 
-/// 从文件导入账号（merge 语义：按 uid 匹配，命中更新、未命中追加）。
+/// 从文件导入账号（merge 语义：按身份匹配，命中更新、未命中追加）。
 ///
-/// 兼容两种形态：整体导出文件 `{ version, exportedAt, accounts }`
-/// 与直接的账号数组 `[...]`，统一取成 accounts 数组再提交给后端。
+/// 兼容两种形态：整体导出文件 `{ version, exportedAt, customProviders, accounts }`
+/// 与直接的账号数组 `[...]`。`customProviders` 段（v2 起的自定义提供商定义）
+/// 原样透传给后端 —— 账号的 provider 字段指向这些定义，丢了它们自定义账号
+/// 就导不回。
 #[tauri::command]
 pub async fn import_accounts(app: AppHandle) -> Result<Value, String> {
     let file = app
@@ -452,24 +464,43 @@ pub async fn import_accounts(app: AppHandle) -> Result<Value, String> {
 
     let parsed: Value = serde_json::from_str(&text)
         .map_err(|error| format!("文件不是有效 JSON: {error}"))?;
-    let accounts = match parsed {
+    let document = unwrap_envelope_file(parsed);
+    let accounts = match &document {
         // 整体导出文件
-        Value::Object(ref map) => map
+        Value::Object(map) => map
             .get("accounts")
             .and_then(Value::as_array)
             .cloned()
             .ok_or("文件中缺少 accounts 字段")?,
         // 直接就是账号数组
-        Value::Array(items) => items,
+        Value::Array(items) => items.clone(),
         _ => return Err("文件内容既不是导出文件也不是账号数组".to_string()),
     };
 
-    gateway::call(
-        "POST",
-        "/api/accounts/import",
-        Some(&json!({ "accounts": accounts, "mode": "merge" })),
-    )
-    .await
+    let mut payload = json!({ "accounts": accounts, "mode": "merge" });
+    if let Value::Object(map) = &document {
+        if let Some(definitions) = map.get("customProviders") {
+            payload["customProviders"] = definitions.clone();
+        }
+    }
+
+    gateway::call("POST", "/api/accounts/import", Some(&payload)).await
+}
+
+/// 网页端旧版「导出」把管理 API 的 `{ success, data }` 响应信封整个存成了
+/// 文件：顶层没有 accounts 而 data 里有时下钻一层，让旧文件不作废。
+/// 标准导出文件（顶层就是 accounts）与纯账号数组原样通过。
+fn unwrap_envelope_file(parsed: Value) -> Value {
+    let Value::Object(map) = &parsed else {
+        return parsed;
+    };
+    if map.contains_key("accounts") {
+        return parsed;
+    }
+    match map.get("data") {
+        Some(data) if data.get("accounts").is_some() => data.clone(),
+        _ => parsed,
+    }
 }
 
 /// 检查新版本：把本应用版本作为 query 参数交给后端比较。
@@ -712,53 +743,3 @@ fn timestamp_for_filename() -> String {
     format!("{year:04}-{month:02}-{day:02}-{hour:02}-{minute:02}-{second:02}")
 }
 
-/// 启动维护：让网关刷新一遍临期凭证，结果推给渲染层。
-/// 任一环节失败只记日志，不影响窗口使用（与原 Electron 版行为一致）。
-///
-/// ── 余额查询为什么从这里移走了 ──────────────────────────────
-/// 原先这里还会调一次 `GET /api/accounts/usage`。现在余额查询归「定时查询积分」
-/// 这条定时任务（`scheduled_tasks` 的 backend 任务，默认每 10 分钟一次），
-/// 而它的**首轮在网关 bootstrap 后就立即跑一次**（`seed_schedule` 把首次排到
-/// 「现在」）—— 于是启动时该做的这一次查询依旧会发生，只是执行者换成了定时任务。
-///
-/// 两处各查一遍的代价是每个账号在启动瞬间被打两次上游积分接口：既无收益
-/// （同一份数据），又平白多担一次风控风险。更关键的是「关掉定时查询积分 =
-/// 启动也不查」这条一致性 —— 与其它定时任务（「关掉任务 = 启动也不刷」）同款，
-/// 留着这里这一份会让那条开关变得半失效。
-///
-/// 界面因此改为读定时任务的结果快照（`/api/accounts/usage/snapshot`），
-/// 由 `usage-actions.js` 的 `syncSnapshot` 应用 —— 手动点「查询积分」那条路径
-/// 不受影响，它仍走 `GET /api/accounts/usage` 当场取。
-pub async fn startup_maintenance(app: AppHandle) {
-    // 临期凭证的刷新**交给网关自己**（POST /api/accounts/refresh-expiring）：
-    // 「哪个账号该刷」是各家 provider 的知识（过期时间字段名、临期窗口四家
-    // 各不相同），壳侧按字段名判断会漏（曾漏掉小浣熊的 `tokenExpiresAt`）。
-    // 网关那边同时还有每 10 分钟的周期维护，这里这一次调用是为了让**刚启动的
-    // 这一轮**尽快把状态刷对，而不是等第一个周期。
-    //
-    // 保留 `refreshed` 的语义（本次实际刷新成功的账号 id 列表）：渲染层的
-    // `accounts:auto-maintained` 事件按它的长度决定要不要提示用户。
-    let refreshed = match gateway::call("POST", "/api/accounts/refresh-expiring", None).await {
-        Ok(report) => report
-            .get("results")
-            .and_then(Value::as_array)
-            .map(|results| {
-                results
-                    .iter()
-                    .filter(|item| item.get("status").and_then(Value::as_str) == Some("refreshed"))
-                    .filter_map(|item| item.get("id").and_then(Value::as_str))
-                    .map(str::to_string)
-                    .collect::<Vec<String>>()
-            })
-            .unwrap_or_default(),
-        Err(error) => {
-            eprintln!("[startup] 自动刷新临期凭证失败: {error}");
-            Vec::new()
-        }
-    };
-
-    let _ = app.emit("accounts:auto-maintained", json!({ "refreshed": refreshed }));
-    if !refreshed.is_empty() {
-        eprintln!("[startup] 已自动刷新 {} 个临期账号的 Token", refreshed.len());
-    }
-}

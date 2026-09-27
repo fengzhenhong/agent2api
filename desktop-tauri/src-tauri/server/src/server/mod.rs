@@ -283,6 +283,11 @@ impl ServerState {
         if let Some(reason) = config_migration::pending_reason() {
             return Err(reason);
         }
+        // Accio 的 OAuth 回调要落在本机端口上，而授权地址由**适配器**拼
+        // （`ProviderAdapter::build_login_url` 是同步无参的，拿不到 ServerState）。
+        // 端口在进程生命周期内不变，这里写一次、之后只读 —— 与各家 models 的
+        // 进程级缓存同一手法（见 `providers::accio::oauth::set_loopback_port`）。
+        crate::server::core::providers::accio::oauth::set_loopback_port(port);
         let config_dir = config::config_dir();
         // 与 Node 版一致：verbose 由环境变量 AGENT2API_VERBOSE=1 打开
         // （旧名 WORKBUDDY_VERBOSE 仍可读，新名优先），
@@ -318,6 +323,13 @@ impl ServerState {
         // 结果 —— 老用户升级后第一次启动拿到的就是他真正的旧配置，
         // 下面日志裁剪天数与旧文件候选目录才不会用错值。
         let snapshot = config::init(db.clone());
+        core::task_state::install(db.clone());
+        // 模型清单的持久化缓存：把**同一个 `Db`** 传进去（与配置 / 日志库 /
+        // 账号库同一形态）。各家的远程清单在进程重启后由它读回，不再回落到
+        // 内置清单（见 `core::providers::catalog_cache` 的模块头）。
+        // 位置必须在这里：它得早于下面那次 `restore_cached_catalogs` 预热 ——
+        // 各家的目录句柄首次初始化时才读缓存，句柄先被碰到就再也读不回来了。
+        core::providers::catalog_cache::install(db.clone());
         // ── 旧文件一次性迁移：**本切片起不再自动跑** ────────────────
         // 它现在由用户在升级弹窗里点「升级」触发（`POST /api/upgrade/run`）。
         // 为什么改成手动：需求是「弹窗告诉用户换了 SQLite，点升级才开始导」——
@@ -396,6 +408,11 @@ impl ServerState {
         // 同一模式）：`core::models::global_catalog()` 与这里的 `models` 是
         // **同一实例**（共享同一把 RwLock），刷新对两边同时可见。
         let models = core::models::global_catalog();
+        // 恢复各家的持久化清单缓存：各家的目录句柄在这一步**首次初始化**
+        // （`OnceLock`），缓存也只在这一刻读得回来（见 `providers::catalog_cache`
+        // 的模块头）。必须在上面那次 `install` 之后 —— 句柄先被别处碰到的话，
+        // 它就固化在「没有缓存」的空状态上，这次预热也补不回来。
+        core::providers::adapter::restore_cached_catalogs();
         let upstream = UpstreamService::new(store.clone(), auth.clone());
 
         // ── 定时签到与软件更新（切片 6）──────────────────────────
@@ -432,6 +449,23 @@ impl ServerState {
         // 启动即收尾上次运行遗留的进行中行（详情见方法注释）：不等到第一条
         // 请求进来才清理，界面打开时看到的就已经是「已中断」的终态
         request_stats.sweep_stale_running();
+        // ── 僵尸行的主动周期清扫（每 5 分钟一次）─────────────────────
+        // 清扫的判定（1 小时阈值）此前只在「下一条请求进来」时顺带跑：
+        // 夜间 / 空闲时段没人发请求，卡死的行会一直挂到第二天早上。
+        // 定时器补上「没人请求也要清」这一半 —— 与启动那次共用同一套判定
+        // （`sweep_stale_running`），不引入第二套规则。
+        // 注：断线兜底（`DisconnectGuard`）与手动终止上线后，进程内产生的
+        // 僵尸行已基本消失；这一层只兜「进程崩溃 / 未覆盖的等待路径」。
+        let sweep_stats = request_stats.clone();
+        crate::spawn_task(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
+            // 第一次 tick 立即完成 —— 启动时刚扫过，跳过它
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                sweep_stats.sweep_stale_running();
+            }
+        });
 
         // ── 账号侧的启动期一次性迁移：**有待迁移数据时整块跳过** ──────
         // 那一组迁移（auth.json 旧登录态、`migrate_startup` 的整队与拆池、

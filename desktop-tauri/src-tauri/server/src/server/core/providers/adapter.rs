@@ -111,14 +111,14 @@
 //! 校验里：`/v1/models` 不会广告清单为空的那家。
 
 use axum::http::HeaderMap;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::server::core::account_store::AccountStore;
 use crate::server::errors::GatewayError;
 
 use super::qoder;
 use super::raccoon;
-use super::{kind_id, meta, ProviderKind};
+use super::{catalog_cache, ProviderKind};
 
 /// 转发前对「账号 + 请求体」的完整构造计划（架构文档 §4.2 的 ChatRequestPlan）。
 ///
@@ -383,6 +383,36 @@ pub trait ProviderAdapter: Send + Sync {
         }
     }
 
+    /// 从**即将发给本家的**发送体里读出随行的思考等级（请求日志「上游等级」
+    /// 列的采集口；`None` = 这条请求没有等级随行）。
+    ///
+    /// ── 调用时机与读的是哪份 body ─────────────────────────────
+    /// `upstream::payload::send_body` 在按家改写模型名、注入映射绑定的等级
+    /// （[`Self::reasoning_patch`]）**之后**调用一次。此时 body 顶层的等级字段
+    /// 要么是客户端显式传的原值（绑定让位时），要么是绑定注入的值 ——
+    /// 读出来的就是上游收到的档位：覆写的家（CatPaw / Qoder）用**本家
+    /// resolver 的同一条取值链**读，与转发行为完全同源；默认实现读的是
+    /// 透传字段（见下）。
+    ///
+    /// ── 为什么默认读透传字段（而不是 None）─────────────────────
+    /// `send_body` 只改写 model 名、注入映射绑定的等级，**不删客户端字段**：
+    /// 客户端显式指定的等级（`reasoning_effort` 等通用键）对每一家都原样
+    /// 随发送体上行 —— 那就是实际发出去的档位，与接不接绑定是两回事
+    /// （「不接」说的是不**注入**，见 [`Self::reasoning_patch`] 的默认 `Skip`；
+    /// 客户端自己传的字段没有理由在显示上抹掉）。默认实现因此用展示侧
+    /// 读取器的并集链读发送体；「关闭思考」两档不算随行档位（与 Qoder
+    /// 覆写同一口径），不预支一个「没发出去」的值。
+    ///
+    /// ── 显示值与真实字节的边界 ─────────────────────────────────
+    /// 返回的是「随请求上行的档位意图值」。Qoder 的协议层还会按模型声明的
+    /// efforts 二次归一（`minimal` → `low`、不支持的档位退默认），那一步需要
+    /// 模型目录上下文，发送体阶段拿不到 —— 显示的因此是意图值而不是归一终值
+    /// （CatPaw 的归并在 `reasoning_patch` 内已完成，无此差异）。
+    fn outbound_reasoning(&self, body: &Value) -> Option<String> {
+        crate::server::core::model_rules::read_client_level(body)
+            .filter(|level| !crate::server::core::model_rules::reasoning_is_off(level))
+    }
+
     /// 判定上游错误类型（status + 已解析的错误体）。
     ///
     /// `error_body` 是**已归一化**的错误对象：至少含 `code`（上游业务码，
@@ -416,6 +446,17 @@ pub trait ProviderAdapter: Send + Sync {
     ///     与功能坏掉无法区分。缓存该不该绕过只由**谁发起**决定，因此把判断权
     ///     交给调用方（本参数），而不是让实现在内部猜。
     ///
+    /// ── `account_id` 是干什么的（第二个行为开关）───────────────
+    /// 指定用**哪个账号**的凭证去打上游目录接口（模型管理页「获取模型」弹窗
+    /// 每行的「模型来源」下拉）：
+    ///   - 空串 = 该家的默认选取：队首的可用账号（与转发默认使用的账号一致），
+    ///     没有账号时各家自己回落到环境变量 / 桌面登录态；
+    ///   - 非空 = 用户点名的那条账号。**点名了就按 id 直取**：取不到返回
+    ///     失败原因（"账号不存在或不可用"），不回落到队首 —— 那会变成
+    ///     「选了 A、用的是 B」的静默错误。
+    /// 目录接口多数是账号级的（凭证不同、可见的清单可能不同），所以界面上
+    /// 这一列要可见、可切换。
+    ///
     /// ── 失败与返回 ──────────────────────────────────────────────
     /// 刷新失败**不返回错误**：目录刷新是维护动作，失败时保留现有清单
     /// （与改造前 `refresh_with_current_account` 的取向一致 —— 只打日志）。
@@ -425,10 +466,21 @@ pub trait ProviderAdapter: Send + Sync {
     fn refresh_models<'a>(
         &'a self,
         store: &'a AccountStore,
+        account_id: &'a str,
         force: bool,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = ModelRefreshOutcome> + Send + 'a>,
     >;
+
+    /// 模型目录刷新是否走「账号」这一维（默认 true；Cline 覆写为 false）。
+    ///
+    /// 「获取模型」弹窗每行的「模型来源」下拉据此决定显示与否：对不走账号维度
+    /// 的家（目录接口无鉴权、清单是全局的），显示一个选了也一样的下拉是误导。
+    /// 与 [`Self::refresh_models`] 的 `account_id` 参数配对 —— 那边忽略参数的
+    /// 家，这边就该声明 false（逐条结果里也不再带 `accountId`）。
+    fn refresh_uses_account(&self) -> bool {
+        true
+    }
 
     /// 本 provider 是否有**已接入的推理转发能力**（五家现在都是 true）。
     ///
@@ -828,6 +880,14 @@ pub fn adapter_for(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         // 参数化，见 `cline::adapter` 的模块头）
         ProviderKind::ClineFree => &super::cline::CLINE_FREE_ADAPTER,
         ProviderKind::ClinePass => &super::cline::CLINE_PASS_ADAPTER,
+        // Accio 的两个地区是两个 provider、两个实例（同一份实现的按地区
+        // 参数化，见 `accio::endpoints::Region` 与 `accio::mod` 的模块头）
+        ProviderKind::Accio => &super::accio::ACCIO_ADAPTER,
+        ProviderKind::AccioCn => &super::accio::ACCIO_CN_ADAPTER,
+        // ZCode 的两个地区是两个 provider、两个实例（同一份实现按地区参数化，
+        // 见 `zcode::adapter` 与 `zcode::region` 的模块头）
+        ProviderKind::Zcode => &super::zcode::adapter::ZCODE_ADAPTER,
+        ProviderKind::ZcodeIntl => &super::zcode::adapter::ZCODE_INTL_ADAPTER,
     }
 }
 
@@ -871,6 +931,16 @@ pub fn implemented_kinds() -> Vec<ProviderKind> {
         ProviderKind::Qoder,
         ProviderKind::ClineFree,
         ProviderKind::ClinePass,
+        // Accio 的两个地区各算一家（同一份实现、两套账号与目录缓存）
+        ProviderKind::Accio,
+        ProviderKind::AccioCn,
+        // ZCode 的两个地区各算一家（同一份实现、两套账号）。
+        // 它**在**本列表里是因为适配器已接真身、能参与目录刷新调度；
+        // 但 `supports_model_refresh()` 为 false（静态清单，见 `zcode::models`），
+        // 所以刷新循环对它是空操作 —— 这不影响「已实现」这个判定：
+        // 本列表回答的是「这家接线了没有」，不是「这家的目录能不能远程刷」。
+        ProviderKind::Zcode,
+        ProviderKind::ZcodeIntl,
     ]
 }
 
@@ -991,35 +1061,78 @@ fn seed_current_cline_defaults() {
     }
 }
 
-/// 让所有**已实现**的 provider 各刷新一次模型目录（后台任务入口）。
+/// 让所有**已实现**的 provider 各刷新一次模型目录（**自动**路径入口）。
 ///
-/// 调用点：`api::chat::spawn_catalog_refresh`（GET /v1/models 的异步刷新）
-/// 与 `ServerState::bootstrap`（启动刷新）。逐个 await（而不是并发）：
-/// provider 数量是个位数、刷新是低频后台动作，串行更好排查（日志顺序稳定）。
-/// 失败不会中断循环 —— 各适配器的 `refresh_models` 已把失败收敛成
-/// 「保留现有清单 + 打日志」。
+/// 调用点：`api::chat::spawn_catalog_refresh`（客户端拉 `/v1/models` 的后台刷新）
+/// 与「模型目录刷新」定时任务。真正的循环在 `providers::catalog_refresh` ——
+/// 与手动路径共用同一段实现，两条入口只在 `manual` 这一个开关上分叉。
 ///
-/// **传 `force = false`**：这是**自动**路径，各家照用自己的缓存/TTL（小浣熊的
-/// 10 分钟 TTL 就是为它设的）。手动按钮走 [`refresh_implemented_forced`]。
-pub async fn refresh_implemented(store: &AccountStore) {
+/// **自动路径受排期与冷却约束**：每家的刷新间隔、在途占位、失败冷却都由
+/// `core::task_state` 持久化（`modelRefresh:<provider>`），因此「重启一次就重刷
+/// 一遍」「客户端每次拉列表都真打一次上游」都不会再发生。这也是它返回逐家结果
+/// 的原因：定时任务要按状态统计（成功 / 跳过 / 失败）并写进任务摘要。
+///
+/// 各家自身的缓存/TTL 仍然生效（`force = false`）：排期说「可以刷了」之后，
+/// 由各家决定这次是否真的打网络。手动按钮走 [`refresh_implemented_forced`]。
+pub async fn refresh_implemented(store: &AccountStore) -> Vec<Value> {
     seed_current_raccoon_defaults();
     seed_current_workbuddy_defaults();
     seed_current_qoder_defaults();
     seed_current_cline_defaults();
+    let results = super::catalog_refresh::refresh(store, &serde_json::Map::new(), None, false).await;
+    // 刷新落地后补种一次：新增的带前缀 / 别名模型在这一刻才出现在清单里
+    // （与开头那次同一件事 —— 那时种的是缓存恢复的清单）
+    seed_current_cline_defaults();
+    results
+}
+
+/// 启动时恢复各家的持久化清单缓存（`ServerState::bootstrap` 在库句柄就绪后
+/// 调用一次，见 `providers::catalog_cache` 的模块头）。
+///
+/// ── 为什么必须显式跑一次 ────────────────────────────────────
+/// 各家的目录句柄是 `OnceLock` **懒初始化**，而持久化缓存只能在首次初始化时
+/// 读回（那正是各家 `restored_state` / `restored_cache` 的位置）。若某个更早的
+/// 调用点先碰到了句柄（那时 `catalog_cache::install` 还没跑），句柄就固化在
+/// 「没有缓存」的空状态上，缓存再也读不回来 —— 症状恰恰是本切片要消灭的那个
+/// （重启后回落到内置清单）。这里显式预热一次，把「首次初始化」钉在库就绪之后。
+///
+/// 顺带补一次默认规则种子：缓存恢复的清单与远程刷新落地的是同一批 id，
+/// 种子该在它们第一次可见时就位（与 [`refresh_implemented`] 开头那几行同一件事，
+/// 只是启动这一刻还没有任何刷新跑过）。
+pub fn restore_cached_catalogs() {
+    // 逐家触发一次 `list_models`（workbuddy 的目录也在这条路上：它的适配器
+    // 直接读 `core::models::global_catalog()`）——返回值丢弃，这里要的只是
+    // 「让各家的句柄初始化一次」这个副作用
     for kind in implemented_kinds() {
-        let adapter = adapter_for(kind);
-        // 注册表与适配器自报的 kind 必须一致（不一致说明 `adapter_for`
-        // 的 match 分支接错了）；只在 debug 断言，release 不 panic（panic=abort）
-        debug_assert_eq!(adapter.kind(), kind);
-        // 自动路径不看结果：各适配器内部已经把「成功 / 没刷 / 失败」都打进了日志
-        // （`refresh_models` 的契约就是失败不返回错误），这里再处理一遍只会重复
-        adapter.refresh_models(store, false).await;
+        let _ = adapter_for(kind).list_models();
+    }
+    seed_current_raccoon_defaults();
+    seed_current_workbuddy_defaults();
+    seed_current_qoder_defaults();
+    seed_current_cline_defaults();
+    // 留痕：哪些家的清单是从持久化缓存恢复的、各是什么时候拉的。没有这条
+    // 日志，「这次的清单是刚拉的还是上次的」在排障时只能靠翻数据库回答。
+    let restored = catalog_cache::cached_scopes();
+    if !restored.is_empty() {
+        let detail = restored
+            .iter()
+            .map(|(scope, at)| format!("{scope}（{}）", catalog_cache::age_text(*at)))
+            .collect::<Vec<_>>()
+            .join("、");
+        crate::server::logging::log(
+            "[Models]",
+            &format!(
+                "📦 已从缓存恢复 {} 份模型清单（{}）——各家的刷新会在拉到新清单后覆盖",
+                restored.len(),
+                detail
+            ),
+        );
     }
 }
 
 /// **手动**刷新模型清单：只刷「支持刷新」的家，且强制绕过缓存。
 ///
-/// 逐家结果：`[{ provider, providerLabel, status, count?, fixed?, message? }, ...]`，
+/// 逐家结果：`[{ provider, providerLabel, status, count?, refreshedAt, fixed?, message? }, ...]`，
 /// 顺序 = 注册表顺序，**每家都有一条**（不支持的家也在里面，status = `skipped`
 /// 并说明原因）—— 界面的汇总（成功 N / 失败 M / 跳过 K）与逐条明细因此能对上
 /// 总数（与 `credential_maintenance::refresh_expiring_accounts` 同一取舍）。
@@ -1027,6 +1140,9 @@ pub async fn refresh_implemented(store: &AccountStore) {
 /// ── 结果字段（前后端契约）──────────────────────────────────────
 ///   - `status`：`"refreshed" | "skipped" | "failed"`（三档语义见下）；
 ///   - `count`：仅在 `refreshed` 时出现，落地后的条目数；
+///   - `refreshedAt`：**这家清单当前的拉取时刻**（毫秒，0 = 从未成功过），
+///     每行都有。取的是清单自身的时刻而不是「本次请求的时刻」—— 失败 / 跳过的
+///     家清单没变，它的时间就该是上次成功那次（界面「更新日期」列读它）；
 ///   - `fixed`：仅在「这家不支持刷新」时出现且为 true —— **机器可识别的标记**，
 ///     前端据此把「能力边界」（固定清单，永远刷不出东西）与「本次没取到新内容」
 ///     分开说；按 `message` 文案匹配会在措辞调整后静默失效
@@ -1037,10 +1153,14 @@ pub async fn refresh_implemented(store: &AccountStore) {
 ///   1. **`force = true`**：用户按下按钮的全部预期是「现在真的去拉一次」。
 ///      小浣熊的 TTL 早退会让「点了没反应、清单没变」，与功能坏掉无法区分。
 ///      缓存只该为后台自动路径服务，用户显式要求时一律绕过。
+///      同理，**普通排期也一并跳过**（`manual` 开关，见 `catalog_refresh`）——
+///      手动刷新可以提前，但仍受在途占位与失败冷却约束（那两条是上游限流，
+///      不该由界面按钮解除）。
 ///   2. **只刷支持的家**：静态清单的家不去打那次必然白跑的网络请求。
 ///   3. **返回逐家结果**：自动路径失败只写日志（没有人在等它）；手动路径必须
 ///      把「哪家刷到了几个、哪家为什么没刷」交给界面 —— 一句笼统的「已刷新」
 ///      会让「其实失败了」和「其实跳过了」都显示成成功。
+///      （自动路径现在同样返回逐家结果：定时任务要按它统计本轮摘要。）
 ///
 /// ── `skipped` 与 `failed` 的区别（界面的文案完全依赖这个区分）──
 ///   - `skipped`：**这次没有可刷的东西，且不是错误**。两种来源：这家没有
@@ -1053,57 +1173,29 @@ pub async fn refresh_implemented(store: &AccountStore) {
 ///
 /// 失败不抛错、逐家串行：一家的失败不影响其余家（`refresh_models` 契约本身就
 /// 失败不返回错误），串行的理由与自动路径相同（provider 个位数、日志顺序稳定）。
-pub async fn refresh_implemented_forced(store: &AccountStore) -> Vec<Value> {
-    let mut results: Vec<Value> = Vec::new();
-    // 手动刷新前对缓存清单补一次种子（刷新成功落地新清单后 raccoon / workbuddy
-    // 内部还会再种一次）
+///
+/// `accounts` 是「这家用哪个账号去拉」的点名表（`{providerId: accountId}`，
+/// 来自「获取模型」弹窗每行的「模型来源」下拉）：缺失或空串 = 该家按默认选取
+/// （队首可用账号，判据同 [`AccountStore::current_entry_for_provider`]）。
+/// 逐条结果里带上 `accountId`（本次**实际**用的账号，前端据此回读那一列 ——
+/// 点名了就是它，没点名就是解析出的队首），供界面显示「这次用的是谁」。
+///
+/// `providers` 是**本次要刷的范围白名单**：`None` = 全部已实现的家（定时任务
+/// 与不带范围的调用方）；`Some(list)` = 只刷名单内的家 —— 「获取模型」弹窗按
+/// 「模型管理页实有清单的家 ∪ 有启用账号的家」收窄（见 `api/models.rs`）。
+/// 名单外与名单为空的家**既不打网络、也不进结果**：对用户在界面上根本看不到的
+/// 家（没有启用账号、清单也为空），刷它只会得到一行「缺少登录态」的噪音。
+pub async fn refresh_implemented_forced(
+    store: &AccountStore,
+    accounts: &serde_json::Map<String, Value>,
+    providers: Option<&[String]>,
+) -> Vec<Value> {
     seed_current_raccoon_defaults();
     seed_current_workbuddy_defaults();
     seed_current_qoder_defaults();
     seed_current_cline_defaults();
-    for kind in implemented_kinds() {
-        let adapter = adapter_for(kind);
-        debug_assert_eq!(adapter.kind(), kind);
-        let provider_id = kind_id(kind);
-        let provider_label = meta(kind).label;
-        if !adapter.supports_model_refresh() {
-            // 不支持的家**不进网络**：静态清单刷十次还是同一份，打上游只是白跑。
-            // `fixed: true` 是给前端的机器可识别标记（理由见上方「结果字段」）。
-            // **当前五家都支持远程目录，本分支在生产路径上走不到** ——
-            // 保留它是给将来新接入的 provider 用的（与 trait 的默认 false 配对）
-            results.push(json!({
-                "provider": provider_id,
-                "providerLabel": provider_label,
-                "status": "skipped",
-                "fixed": true,
-                "message": "该提供商使用固定模型清单（上游没有远程目录接口）",
-            }));
-            continue;
-        }
-        let outcome = adapter.refresh_models(store, true).await;
-        if outcome.refreshed {
-            results.push(json!({
-                "provider": provider_id,
-                "providerLabel": provider_label,
-                "status": "refreshed",
-                "count": outcome.count,
-            }));
-        } else if let Some(message) = outcome.message {
-            results.push(json!({
-                "provider": provider_id,
-                "providerLabel": provider_label,
-                "status": "failed",
-                "message": message,
-            }));
-        } else {
-            results.push(json!({
-                "provider": provider_id,
-                "providerLabel": provider_label,
-                "status": "skipped",
-                "message": "本次刷新没有取到新清单（上游未返回可用的模型列表）",
-            }));
-        }
-    }
+    let results = super::catalog_refresh::refresh(store, accounts, providers, true).await;
+    seed_current_cline_defaults();
     results
 }
 

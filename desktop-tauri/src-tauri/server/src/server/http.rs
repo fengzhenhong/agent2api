@@ -115,6 +115,15 @@ pub fn panel_router(state: ServerState) -> Router {
         .route(
             "/auth/callback-{vendor}",
             get(api::session::login_autoclaw_oauth_callback),
+        )
+        // Accio 网页登录的 loopback 回调：**浏览器 302 到这里**（授权页完成后
+        // 顶层导航到我们交给它的 return_url，查询串带 code / state）。
+        // 与上面 AutoClaw 那条同一形态、同一理由免鉴权；路径是我们自己定的
+        // （Accio 的 return_url 由发起方给，不必与官方客户端逐字同款），
+        // 见处理函数的说明。
+        .route(
+            "/auth/callback-accio",
+            get(api::session::login_accio_callback),
         );
 
     // 需鉴权：Node 版对这些路径都调用了 checkApiKey
@@ -166,6 +175,12 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/stats/requests/raw",
             get(api::stats_api::stats_request_raw),
         )
+        // 手动终止一条在途请求（详情弹窗的「终止请求」按钮）。POST 且同样
+        // 排在通配之前 —— 顺序理由与上面两条相同
+        .route(
+            "/api/stats/requests/terminate",
+            post(api::stats_api::stats_request_terminate),
+        )
         // 清理弹窗的预览统计（将删明细数 / 带报文数 / 库占用 / 压缩状态）
         .route(
             "/api/stats/requests/clear-preview",
@@ -197,6 +212,20 @@ pub fn panel_router(state: ServerState) -> Router {
         .route(
             "/api/retry",
             get(api::retry_api::get_retry).put(api::retry_api::put_retry),
+        )
+        // 上游请求超时（四项）：GET 读、PUT（允许部分字段）更新。
+        // 与 /api/retry 同一模式、同一理由独立成端点：保存后对下一个请求
+        // 立即生效（连接超时经由出网客户端，其余三项在各阶段自己的计时器上）。
+        .route(
+            "/api/timeouts",
+            get(api::timeouts_api::get_timeouts).put(api::timeouts_api::put_timeouts),
+        )
+        // 排队等待（次数 / 单次秒数）：走排队制的上游（目前是 Qoder 免费模型）
+        // 在模型繁忙时回报「建议 N 秒后再来」，转发层据此退避重发几次。
+        // 与 /api/timeouts 同一模式：保存后对下一个请求立即生效。
+        .route(
+            "/api/queue",
+            get(api::queue_api::get_queue).put(api::queue_api::put_queue),
         )
         // ── 调试模式（设置页「通用 → 调试模式」）──
         // GET/PUT 开关；traffic 是按 id 取原始报文的详情端点（列表接口不返回
@@ -322,6 +351,13 @@ pub fn panel_router(state: ServerState) -> Router {
         .route(
             "/api/custom-providers/remove",
             post(api::custom_providers::remove_custom_provider),
+        )
+        // ── 「从其他工具导入」（「导入」分段的数据源）──
+        // 扫描本机 cc-switch 数据库，响应携带 API Key 明文（导入动作需要），
+        // 与上面的管理接口同级敏感，挂 protected。
+        .route(
+            "/api/import/cc-switch",
+            get(api::import_sources::scan_cc_switch),
         )
         // 模型清单的两条（第二阶段）：整表保存 / 服务端代理拉取上游清单。
         // 挂 protected 的理由与上面的管理四条相同；fetch-models 还会真打上游

@@ -55,11 +55,17 @@ pub const DEFAULT_TIME: &str = "00:01";
 ///     （`providers::autoclaw::checkin`）。两个地区**都支持** —— 任务接口在
 ///     两地是同一套路径、同一套任务 id，只是站点不同（已实测），因此两家
 ///     都列进来；地区由 `billing::checkin` 从账号的 provider 反查。
+///   - **Qoder 中国版**：活动（campaign）领取链路（`providers::qoder::checkin`）。
+///     只有中国版有每日签到 —— 国际版这个地区没有签到计划（legacy 路径 404、
+///     活动列表里只有促销），由 `billing::checkin::supports_checkin` 按 edition
+///     排除。中国版里 Free 套餐账号也可能没有被下发活动（实测如此），那种情况
+///     实现返回一条中性结果（「当前没有可领取的签到活动」），不算失败。
 ///
-/// 这是「有签到活动」的清单，不是「有积分概念」的清单：CatPaw / Qoder 有积分
-/// 查询但没有签到，因此不在此列 —— 它们的账号在批量签到里被算作 `skipped`。
+/// 这是「有签到活动」的清单，不是「有积分概念」的清单：CatPaw 有积分查询但
+/// 没有签到，因此不在此列 —— 它的账号在批量签到里被算作 `skipped`。
 /// 加一家之前先确认它的签到链路真的存在（一个点了必然报错的复选框比没有更糟）。
-pub const CHECKIN_PROVIDERS: [&str; 4] = ["workbuddy", "raccoon", "autoclaw", "autoclaw-intl"];
+pub const CHECKIN_PROVIDERS: [&str; 5] =
+    ["workbuddy", "raccoon", "autoclaw", "autoclaw-intl", "qoder"];
 
 /// 缺省的签到提供商集合（全选）
 pub fn default_providers() -> Vec<String> {
@@ -83,9 +89,14 @@ pub fn default_providers() -> Vec<String> {
 /// 另外几家没有这个后缀：小浣熊没有版本区分（`edition` 概念不适用于它），
 /// AutoClaw 两地的签到链路都存在且同形 —— 它的展示名已经带「国内版 / 国际版」
 /// 后缀（注册表里就是），因此不需要在这里再补。
+///
+/// **Qoder 要补**（与 WorkBuddy 同理，但方向相反）：注册表里的名字是通用的
+/// 「Qoder」，而签到只在中国版成立（国际版没有签到计划），所以这里覆盖成
+/// 「Qoder 中国版」——用户勾上它时就知道自家国际版账号不会参与。
 fn provider_label(id: &str) -> &str {
     match id {
         "workbuddy" => "WorkBuddy 国内版",
+        "qoder" => "Qoder 中国版",
         other => crate::server::core::providers::PROVIDERS
             .iter()
             .find(|meta| meta.id == other)

@@ -248,6 +248,28 @@ pub async fn dispatch(
                 return clear_rate_limits(&state, &id, body);
             }
         }
+        // ZCode「周末套餐」：探测（只读、不要验证码）与领取（要验证码）。
+        // 两个后缀互不包含（`/zcode-claim/preview` 不以 `/zcode-claim` 结尾），
+        // 因此这里的先后不影响命中 —— 但读的时候按「先探测后领取」排列，
+        // 与界面上用户的操作顺序一致。
+        if let Some(id) = rest.strip_suffix("/zcode-claim/captcha-config") {
+            let id = decode_segment(id);
+            if !id.is_empty() {
+                return super::zcode_claim::captcha_config(&state, &id).await;
+            }
+        }
+        if let Some(id) = rest.strip_suffix("/zcode-claim/preview") {
+            let id = decode_segment(id);
+            if !id.is_empty() {
+                return super::zcode_claim::preview(&state, &id).await;
+            }
+        }
+        if let Some(id) = rest.strip_suffix("/zcode-claim") {
+            let id = decode_segment(id);
+            if !id.is_empty() {
+                return super::zcode_claim::claim_plan(&state, &id, body).await;
+            }
+        }
     }
 
     // ④ PATCH / DELETE → 把剩余段当账号 id。
@@ -352,8 +374,9 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
         // 两个地区走**同一份实现**、按地区参数化（`autoclaw::region`）：账号集合
         // 按 provider 隔离，因此这里的 kind → region 必须逐字对应，不能让国际版
         // 落进国内版的记录里（那会让两家的账号在同一分组里混着，选路也按错误的
-        // 域名发请求）。`importDesktop` 只对国内版有意义 —— 那个文件没有地区
-        // 标记，国际版分支会在存储层明确拒绝（见 `import_autoclaw_desktop_account`）。
+        // 域名发请求）。`importDesktop` 两地都给：桌面端那个 auth.json 没有地区
+        // 标记、两个构建共用，**地区由用户选的那一项决定**（见
+        // `import_autoclaw_desktop_account` 与 `region.rs` 的完整讨论）。
         Some(kind @ (crate::server::core::providers::ProviderKind::AutoClaw
             | crate::server::core::providers::ProviderKind::AutoClawIntl)) => {
             let region = crate::server::core::providers::autoclaw::Region::from_kind(kind)
@@ -367,6 +390,32 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
         Some(crate::server::core::providers::ProviderKind::Qoder) => {
             match crate::server::core::providers::qoder::auth::prepare_account(&payload).await {
                 Ok(credentials) => store.add_qoder_account(&credentials, import_name, "manual"),
+                Err(error) => Err(AccountStoreError::new(error.message, error.status_code)),
+            }
+        }
+        // Accio（两个地区）：粘贴 accessToken / refreshToken（`mode` 选地区，
+        // 缺省国际版）→ 手动添加。「网页登录」是另一条链路（适配器的
+        // `supports_web_login` 走 `/api/session/login/start` → OAuth 回调 →
+        // 同一个落账号入口 `add_accio_account`）。
+        //
+        // `importDesktop` 不提供：Accio 桌面端的登录态落在 Electron 会话与 OS
+        // 加密区里（没有 auth.json 那种稳定可读的文件形态），给了入口只会稳定
+        // 失败 —— 与 AutoClaw「一读一解密」不同，不要照抄那边。
+        Some(kind @ (crate::server::core::providers::ProviderKind::Accio
+            | crate::server::core::providers::ProviderKind::AccioCn)) => {
+            let region = crate::server::core::providers::accio::endpoints::Region::from_kind(kind)
+                .unwrap_or(crate::server::core::providers::accio::endpoints::Region::Global);
+            if import_desktop {
+                return management_error(
+                    400,
+                    format!(
+                        "Accio {}不支持导入桌面端登录态，请用「网页登录」或粘贴凭证添加账号",
+                        region.label()
+                    ),
+                );
+            }
+            match crate::server::core::providers::accio::auth::prepare_account(&payload).await {
+                Ok(credentials) => store.add_accio_account(&credentials, import_name, "manual"),
                 Err(error) => Err(AccountStoreError::new(error.message, error.status_code)),
             }
         }
@@ -385,6 +434,62 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
             } else {
                 store.add_cline_account(provider_id, &payload, import_name)
             }
+        }
+        // ZCode（两个地区）：**粘贴凭证**（`jwt` + `accessToken`）→ 手动添加；
+        // 「网页登录」是另一条链路（`api::session::login_start` 的 ZCode 分支 →
+        // `core::login::zcode` 的 CLI 轮询任务 → 同一个落账号入口
+        // `add_zcode_account`）。
+        //
+        // ── 为什么两个字段都要收、且只给一个也能落 ───────────────
+        // 两者服务**不同的功能**（见 `zcode::credentials` 的模块头）：
+        // `accessToken` 转发用、`jwt` 领取用，互相不能替代。用户想测哪一半
+        // 就填哪一半 —— 只给了 jwt 的账号能领取不能转发（转发会如实报缺），
+        // 反之亦然。这正是「粘贴」这条路相对网页登录的价值：
+        // 不必先过一遍 OAuth 就能单独验证领取协议。
+        //
+        // `importDesktop` 不提供：ZCode 客户端的凭证在它自己的加密存储里，
+        // 没有 auth.json 那种稳定可读的形态 —— 给了入口只会稳定失败
+        // （与 Accio 同一处境、同一处置，不要照抄 AutoClaw 那边）。
+        Some(kind @ (crate::server::core::providers::ProviderKind::Zcode
+            | crate::server::core::providers::ProviderKind::ZcodeIntl)) => {
+            let region = crate::server::core::providers::zcode::region::Region::from_kind(kind)
+                .unwrap_or(crate::server::core::providers::zcode::region::Region::Cn);
+            if import_desktop {
+                return management_error(
+                    400,
+                    format!(
+                        "ZCode {}不支持导入桌面端登录态，请用「网页登录」或粘贴凭证添加账号",
+                        region.label()
+                    ),
+                );
+            }
+            let text_field = |key: &str| {
+                payload
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let access_token = text_field("accessToken");
+            let jwt = text_field("jwt");
+            if access_token.is_empty() && jwt.is_empty() {
+                return management_error(
+                    400,
+                    "请至少填写 accessToken（用于转发）或 jwt（用于领取套餐）",
+                );
+            }
+            let credentials = crate::server::core::providers::zcode::credentials::ZcodeCredentials {
+                region,
+                access_token,
+                jwt,
+                user_id: text_field("userId"),
+                // 设备标识是领取链路的活动期要求（见 `credentials.rs` 的模块头）：
+                // 用户没给就新生成一个，随凭证落盘后跨请求稳定
+                device_mid: crate::server::core::providers::zcode::credentials::new_device_mid()
+                    .unwrap_or_default(),
+            };
+            store.add_zcode_account(&credentials, import_name, "manual")
         }
         Some(crate::server::core::providers::ProviderKind::WorkBuddy) | None => {
             store.add_account(&payload, None)
@@ -419,10 +524,28 @@ pub async fn import_accounts(state: &ServerState, body: &Bytes) -> Response {
         Ok(value) => value,
         Err(response) => return response,
     };
+    // 兼容管理 API 的 `{ success, data }` 信封壳：网页端此前的「导出」把整个
+    // 信封存成了文件，顶层没有 accounts。这类文件导回时在这里下钻一层 ——
+    // 已发出的旧文件不作废；标准导出文件（顶层就是 accounts）不受影响。
+    let payload = match envelope_data(&payload) {
+        Some(data) => data,
+        None => payload,
+    };
     match crate::server::core::account_transfer::import_accounts(state.store(), &payload) {
         Ok(result) => ok_json(result),
         Err(error) => store_error(error),
     }
+}
+
+/// 若 `payload` 是「信封壳」（对象、顶层无 accounts、`data` 字段是含 accounts
+/// 的对象）则返回内层 data 的克隆，否则 None。
+fn envelope_data(payload: &Value) -> Option<Value> {
+    let object = payload.as_object()?;
+    if object.contains_key("accounts") {
+        return None;
+    }
+    let data = object.get("data")?;
+    data.get("accounts").is_some().then(|| data.clone())
 }
 
 // ─── POST /api/accounts/current ─────────────────────────────
@@ -559,6 +682,18 @@ pub async fn refresh_account(state: &ServerState, body: &Bytes) -> Response {
     if state.store().qoder_account_record(&id).is_some() {
         return refresh_provider_account(state, &id, ProviderKind::Qoder).await;
     }
+    // Accio（两个地区）：走适配器的强制刷新（`POST /api/auth/refresh_token`，
+    // 结果按「比较再写」回写）。两个地区各查一次 —— 账号集合按 provider 隔离，
+    // 同一 id 不可能同时属于两家（撞 id 在存储层就报错了）。
+    for region in crate::server::core::providers::accio::endpoints::Region::ALL {
+        if state
+            .store()
+            .accio_account_record(&id, region.provider_id())
+            .is_some()
+        {
+            return refresh_provider_account(state, &id, region.kind()).await;
+        }
+    }
     // Cline 账号：与 AutoClaw 同一取舍 —— **桌面端实时登录态不主动刷新**。
     // 网关与 Cline 客户端共用同一份 providers.json 里的 refreshToken，
     // 网关侧刷新会让客户端那边的会话作废（两边都在轮换，后写的赢）。
@@ -656,6 +791,9 @@ async fn refresh_provider_account(state: &ServerState, id: &str, kind: ProviderK
 pub async fn refresh_expiring_accounts(state: &ServerState) -> Response {
     let report =
         crate::server::core::credential_maintenance::refresh_expiring_report(state.store()).await;
+    // 这一轮已经真刷过一遍了：把定时维护的排期顺延一个间隔（口径与其它手动
+    // 入口一致）—— 否则「刚点完维护、到点或重启后又立刻再刷一遍」。
+    crate::server::core::credential_maintenance::note_manual_run();
     ok_json(report)
 }
 

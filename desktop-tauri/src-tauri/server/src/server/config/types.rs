@@ -21,6 +21,8 @@
 //!   - **边界**（`DEFAULT_*` / `*_MIN_*` / `*_MAX_*`）：读侧回落与写侧校验
 //!     共用同一份数字，避免「接口拒绝 60 而手改库接受它」这种两套口径。
 
+use std::sync::Arc;
+
 /// 默认模型：客户端未指定模型时使用（对应 Node 版 `--default-model` 默认值）
 pub const DEFAULT_MODEL: &str = "auto";
 /// 计费接口默认语言（对应 Node 版 `--locale` 默认值）
@@ -230,11 +232,14 @@ pub const DEFAULT_MODEL_REFRESH_MINUTES: i64 = 60;
 pub const DEFAULT_LOGS_AUTO_REFRESH_SECONDS: i64 = 1;
 pub const DEFAULT_REQUESTS_AUTO_REFRESH_SECONDS: i64 = 1;
 pub const DEFAULT_REPORT_AUTO_REFRESH_SECONDS: i64 = 1;
-/// 软件版本检查默认间隔（分钟）：每 5 分钟查一次 GitHub 最新发布。
+/// 软件版本检查默认间隔（分钟）：每 20 分钟查一次 GitHub 最新发布。
 ///
-/// GitHub 匿名限额是 60 次/小时/IP：5 分钟一次（12 次/小时）留足余量；
-/// 下限仍是全局的 INTERVAL_MIN_MINUTES，但设到 1 分钟贴着限额跑没有意义。
-pub const DEFAULT_UPDATE_CHECK_MINUTES: i64 = 5;
+/// 20 分钟 = 3 次/小时，相对匿名限额（60 次/小时，且**按出口 IP 计** —— 同一
+/// 出口下的其它程序共用这份额度）留足余量，又能让新版本的提示在一刻钟量级内
+/// 出现。**这个默认值只影响「没配过间隔」的情形**：已经保存过
+/// `scheduledTasks.updateCheck.interval` 的配置按原值跑（`interval_field`
+/// 只在键缺失或越界时才回落到默认），所以调整它不会改写老用户的设置。
+pub const DEFAULT_UPDATE_CHECK_MINUTES: i64 = 20;
 /// 定时查询积分的默认间隔（分钟）：每 10 分钟查一次全部账号的余额。
 ///
 /// 与凭证维护同档：一条余额查询就是逐账号打一次上游的积分接口，
@@ -374,6 +379,24 @@ pub const DEFAULT_RETRY_SWITCH_COUNT: i64 = 5;
 /// 重试间隔默认值：5 秒
 pub const DEFAULT_RETRY_INTERVAL_SECONDS: i64 = 5;
 
+/// 「指定错误码直接换号」的配置键（值是 HTTP 状态码数组，如 `[402, 429]`）。
+///
+/// 键名里的 `NoRetry` 是历史措辞（最早的语义是「命中即报错」），行为后来
+/// 改成了「不在同一账号重发、直接换下一个账号」—— 键名是配置契约，改名
+/// 会让老配置读不到，保留至今。命中名单的上游失败跳过本账号：原地重发与
+/// 同账号补救（内容拦截换提示词 / 401 刷新）都不做，按队列换下一个账号
+/// 继续试，换满仍失败才把错误给客户端。
+pub const KEY_RETRY_NO_RETRY_CODES: &str = "noRetryStatusCodes";
+/// 默认名单：402（WorkBuddy 积分不足）。余额问题重发结论不变，
+/// 客户端拿到 402 才能如实体感「这个账号没钱了」。
+pub const DEFAULT_NO_RETRY_CODES: &[u16] = &[402];
+/// 名单里状态码的合法范围：HTTP 状态码本身就定义在 100–599
+pub const RETRY_CODE_MIN: u16 = 100;
+pub const RETRY_CODE_MAX: u16 = 599;
+/// 名单长度上限：状态码总共就 500 个，50 项足够表达任何配置，
+/// 也防止一次粘贴把界面和 config.json 撑爆
+pub const RETRY_MAX_NO_RETRY_CODES: usize = 50;
+
 /// 次数与间隔的合法范围。
 ///
 /// 上限 10 次 / 300 秒：次数过多或间隔过长都会让客户端干等（重试是「再发一次」，
@@ -387,8 +410,10 @@ pub const RETRY_MAX_INTERVAL_SECONDS: i64 = 300;
 /// 请求重试设置（设置页「通用 → 请求重试」区域）。
 ///
 /// 与 `RetentionSettings` 同一取舍：几个值总是一起用（转发层每次重试判定
-/// 都取），打包成 `Copy` 值让调用方一次拿到、不必多次读锁。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 都取），打包成一个快照值让调用方一次拿到、不必多次读锁。
+/// 曾经是 `Copy` 的；`no_retry_codes` 加进来后共享列表只能 `Clone`
+/// （`Arc` 本身不是 Copy）—— 快照克隆只多一次指针自增，热路径无感。
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RetrySettings {
     /// **同一账号内**的原地重发次数（0 = 失败立即换号）
     pub count: i64,
@@ -401,6 +426,12 @@ pub struct RetrySettings {
     pub account_switch_count: i64,
     /// 两次重试之间的间隔（秒）
     pub interval_seconds: i64,
+    /// **指定错误码直接换号**名单（[`KEY_RETRY_NO_RETRY_CODES`]）。
+    ///
+    /// 为什么是 `Arc<[u16]>` 而不是 `Vec<u16>`：快照被逐失败请求取用，
+    /// `Arc` 让克隆只付一次指针自增；判定（`no_retry`）读的是共享切片，
+    /// 不需要任何锁。
+    pub no_retry_codes: Arc<[u16]>,
 }
 
 impl RetrySettings {
@@ -421,6 +452,11 @@ impl RetrySettings {
     pub fn switch_budget(&self) -> usize {
         self.account_switch_count.max(0) as usize
     }
+
+    /// 这个上游状态码是否命中「直接换号」名单。
+    pub fn no_retry(&self, status: u16) -> bool {
+        self.no_retry_codes.contains(&status)
+    }
 }
 
 impl Default for RetrySettings {
@@ -429,14 +465,188 @@ impl Default for RetrySettings {
             count: DEFAULT_RETRY_COUNT,
             account_switch_count: DEFAULT_RETRY_SWITCH_COUNT,
             interval_seconds: DEFAULT_RETRY_INTERVAL_SECONDS,
+            no_retry_codes: Arc::from(DEFAULT_NO_RETRY_CODES),
         }
     }
 }
 
 /// 请求重试的**部分**更新入参（`None` = 该项不动）。
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct RetryPatch {
     pub count: Option<i64>,
     pub account_switch_count: Option<i64>,
     pub interval_seconds: Option<i64>,
+    pub no_retry_codes: Option<Vec<u16>>,
+}
+
+// ─── 上游请求超时（四个阶段，对应 OmniProxy 的同名设置）──────────────
+
+/// 连接超时：建立上游 TCP/TLS 连接或代理隧道的最大等待时间（秒）
+pub const KEY_TIMEOUT_CONNECT_SECONDS: &str = "connectTimeoutSeconds";
+/// 等待响应超时：请求发出后等待上游响应头的最大时间（秒）
+pub const KEY_TIMEOUT_HEADERS_SECONDS: &str = "headersTimeoutSeconds";
+/// 流式响应空闲超时：流式响应相邻数据之间允许的最大空闲时间（秒），收到新数据后重新计时
+pub const KEY_TIMEOUT_STREAM_IDLE_SECONDS: &str = "streamIdleTimeoutSeconds";
+/// 非流式响应超时：读取完整非流式响应体允许的最大时间（秒）
+pub const KEY_TIMEOUT_BODY_SECONDS: &str = "bodyTimeoutSeconds";
+
+/// 连接超时默认值：30 秒（与 egress 里原先的硬编码值一致）
+pub const DEFAULT_TIMEOUT_CONNECT_SECONDS: i64 = 30;
+/// 等待响应超时默认值：300 秒（与 request.rs 原先的 HEADERS_TIMEOUT_MS 一致）
+pub const DEFAULT_TIMEOUT_HEADERS_SECONDS: i64 = 300;
+/// 流式空闲超时默认值：300 秒（与 OmniProxy 的 stream_idle_timeout 一致）
+pub const DEFAULT_TIMEOUT_STREAM_IDLE_SECONDS: i64 = 300;
+/// 非流式响应超时默认值：300 秒（与 OmniProxy 的 body_timeout 一致）
+pub const DEFAULT_TIMEOUT_BODY_SECONDS: i64 = 300;
+
+/// 四项超时的合法范围（秒）：与 OmniProxy 的 1~3600 逐字一致。
+///
+/// 下限 1 而不是 0：0 在这里没有合理语义（「立即超时」等于禁用转发，
+/// 想禁用某一阶段保护的人其实要的是把它调大到上限）。
+pub const TIMEOUT_MIN_SECONDS: i64 = 1;
+pub const TIMEOUT_MAX_SECONDS: i64 = 3600;
+
+/// 上游请求超时（设置页「通用 → 请求超时」区域）。
+///
+/// 四个阶段各一个值，与 OmniProxy 的 connect / headers / stream_idle / body
+/// 一一对应；转发层逐请求取一次快照（`Copy`，四个 i64）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimeoutSettings {
+    /// 建连（含到代理的那一段）
+    pub connect_seconds: i64,
+    /// 请求发出 → 响应头到达
+    pub headers_seconds: i64,
+    /// 流式响应相邻数据之间的最大空闲
+    pub stream_idle_seconds: i64,
+    /// 非流式响应体读完的总预算
+    pub body_seconds: i64,
+}
+
+impl TimeoutSettings {
+    /// 负数 / 0 按最小值兜底（防御性：读侧已由 bounded_int_field 保证范围，
+    /// 转 `u64` 前必须挡住，否则回绕成天文数字）
+    fn ms(seconds: i64) -> u64 {
+        seconds.max(TIMEOUT_MIN_SECONDS) as u64 * 1000
+    }
+
+    pub fn connect_ms(&self) -> u64 {
+        Self::ms(self.connect_seconds)
+    }
+
+    pub fn headers_ms(&self) -> u64 {
+        Self::ms(self.headers_seconds)
+    }
+
+    pub fn stream_idle_ms(&self) -> u64 {
+        Self::ms(self.stream_idle_seconds)
+    }
+
+    pub fn body_ms(&self) -> u64 {
+        Self::ms(self.body_seconds)
+    }
+
+    /// 传输层 read_timeout 的后备上限：取「等响应头」与「流空闲」两者的大者。
+    ///
+    /// reqwest 的 `read_timeout` 作用于每一次读（既覆盖首包前、也覆盖数据块
+    /// 之间），而这两个阶段是分开的旋钮 —— 后备值取大者，保证它**永不**成为
+    /// 哪个旋钮的隐藏天花板（真正的判定在各阶段自己的计时器，见
+    /// `upstream::request` 与 `upstream::ForwardStream`）。
+    pub fn read_timeout_backstop_ms(&self) -> u64 {
+        self.headers_ms().max(self.stream_idle_ms())
+    }
+}
+
+impl Default for TimeoutSettings {
+    fn default() -> Self {
+        Self {
+            connect_seconds: DEFAULT_TIMEOUT_CONNECT_SECONDS,
+            headers_seconds: DEFAULT_TIMEOUT_HEADERS_SECONDS,
+            stream_idle_seconds: DEFAULT_TIMEOUT_STREAM_IDLE_SECONDS,
+            body_seconds: DEFAULT_TIMEOUT_BODY_SECONDS,
+        }
+    }
+}
+
+/// 四项超时的**部分**更新入参（`None` = 该项不动）。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TimeoutPatch {
+    pub connect_seconds: Option<i64>,
+    pub headers_seconds: Option<i64>,
+    pub stream_idle_seconds: Option<i64>,
+    pub body_seconds: Option<i64>,
+}
+
+// ─── 排队等待（走排队制的上游：目前只有 Qoder 的免费模型）─────────────
+
+/// 排队时最多等待几次（0 = 不等待，直接把排队态作为错误返回）
+pub const KEY_QUEUE_MAX_WAITS: &str = "queueMaxWaits";
+/// 单次排队等待的秒数（0 = 跟随上游建议值）
+pub const KEY_QUEUE_WAIT_SECONDS: &str = "queueWaitSeconds";
+
+/// 默认等待次数：2 次。
+///
+/// 与参考实现（CLIProxyAPI 的 qoder2api 插件 `queue_max_waits` 默认值）取同一
+/// 档：上游给的建议间隔实测 9～30 秒，两次最多等一分钟 —— 落在「用户还能接受
+/// 的首字等待」与「默认 300 秒的等待响应超时」之间。
+pub const DEFAULT_QUEUE_MAX_WAITS: i64 = 2;
+/// 默认单次等待秒数：0 = 跟随上游建议（上游没给建议时适配器退到 15 秒）
+pub const DEFAULT_QUEUE_WAIT_SECONDS: i64 = 0;
+
+/// 等待次数的合法范围 0~10：0 = 关闭等待（排队即报错）。上限 10 是因为
+/// 「等一会儿再发」等得太多次不如让客户端自己决定重试 —— 它会收到一条写清
+/// 「排队中、不是登录态或额度问题」的错误，而不是一个看不出所以然的超时。
+pub const QUEUE_MIN_MAX_WAITS: i64 = 0;
+pub const QUEUE_MAX_MAX_WAITS: i64 = 10;
+/// 单次等待秒数的合法范围 0~120（0 = 跟随上游建议）
+pub const QUEUE_MIN_WAIT_SECONDS: i64 = 0;
+pub const QUEUE_MAX_WAIT_SECONDS: i64 = 120;
+
+/// 排队等待设置（设置页「通用 → 排队等待」区域）。
+///
+/// 与 `TimeoutSettings` 同一取舍：两个值总是一起用（每次排队判定取一份快照），
+/// 打包成一个 `Copy` 值让调用方一次拿到。
+///
+/// ── 它影响谁 ────────────────────────────────────────────────
+/// 只有**走排队制的适配器**读它（目前是 Qoder：免费模型繁忙时上游用 403 +
+/// 业务码 10605 回一句「暂不可服务，建议 N 秒后再来」）。其它家没有排队语义，
+/// 这份设置对它们无影响。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueueSettings {
+    /// 最多等待次数（0 = 不等待）
+    pub max_waits: i64,
+    /// 单次等待秒数（0 = 跟随上游建议值）
+    pub wait_seconds: i64,
+}
+
+impl QueueSettings {
+    /// 等待次数预算（负值按 0：读侧已保证范围，这里是防御性的）
+    pub fn wait_budget(&self) -> usize {
+        self.max_waits.clamp(QUEUE_MIN_MAX_WAITS, QUEUE_MAX_MAX_WAITS) as usize
+    }
+
+    /// 强制单次等待时长（毫秒）；`None` = 跟随上游建议
+    pub fn forced_wait_ms(&self) -> Option<u64> {
+        let seconds = self.wait_seconds.clamp(QUEUE_MIN_WAIT_SECONDS, QUEUE_MAX_WAIT_SECONDS);
+        if seconds > 0 {
+            Some(seconds as u64 * 1000)
+        } else {
+            None
+        }
+    }
+}
+
+impl Default for QueueSettings {
+    fn default() -> Self {
+        Self {
+            max_waits: DEFAULT_QUEUE_MAX_WAITS,
+            wait_seconds: DEFAULT_QUEUE_WAIT_SECONDS,
+        }
+    }
+}
+
+/// 排队等待的**部分**更新入参（`None` = 该项不动）。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct QueuePatch {
+    pub max_waits: Option<i64>,
+    pub wait_seconds: Option<i64>,
 }

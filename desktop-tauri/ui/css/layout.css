@@ -505,27 +505,9 @@ body.has-titlebar .shell {
 }
 
 /* 页头：标题 + 一句话说明 */
-.page-head {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
-}
-
-.page-head h2 {
-  font-size: 17px;
-  font-weight: 650;
-  letter-spacing: -.2px;
-}
-
-.page-head .intro {
-  flex: 1 1 300px;
-  color: var(--text-2);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
+/* 页面头（标题 + 一句描述）已按需求整体移除：标题在顶栏面包屑里已有，
+   描述是读过一次就不再看的说明文字，占着页面最贵的一行。
+   各页需要长期可见的说明各自收在面板的表尾（.panel-foot）里。 */
 /* ─── 面板 ─── */
 .panel {
   position: relative;
@@ -554,10 +536,7 @@ body.has-titlebar .shell {
 .panel-head h2 { font-size: 13.5px; font-weight: 650; }
 .panel-head .panel-sub { color: var(--text-3); font-size: 11.5px; }
 .head-actions { margin-left: auto; display: flex; gap: 7px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
-
 .panel-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
-.panel-body.flush { padding: 0; }
-
 /* 面板底注：说明文字收在底部灰条里，不抢主内容 */
 .panel-foot {
   display: flex;
@@ -589,8 +568,6 @@ body.has-titlebar .shell {
      锁死、滚动依旧只发生在列表内部，不产生新的页面级滚动条。 */
   padding-bottom: var(--pad);
 }
-
-.page[data-page="accounts"] .page-head { flex: none; }
 
 .page[data-page="accounts"] .panel {
   flex: 1;
@@ -630,8 +607,6 @@ body.has-titlebar .shell {
   padding-bottom: var(--pad);
 }
 
-.page[data-page="tasks"] .page-head { flex: none; }
-
 .page[data-page="tasks"] .panel {
   flex: 1;
   min-height: 0;
@@ -646,9 +621,6 @@ body.has-titlebar .shell {
 /* 面板体只是包裹层，真正滚动的是里面的 .task-list（与日志页把滚动放在 .log-list
    上同一套做法）：面板内边距因此留在滚动区之外，卡片滚到底不会贴着面板边框。 */
 .page[data-page="tasks"] .panel-body { flex: 1; min-height: 0; }
-
-.page[data-page="logs"] .page-head,
-.page[data-page="requests"] .page-head { flex: none; }
 
 .page[data-page="logs"] .panel,
 .page[data-page="requests"] .panel {

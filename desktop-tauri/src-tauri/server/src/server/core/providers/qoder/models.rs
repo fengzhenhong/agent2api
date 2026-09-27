@@ -36,8 +36,10 @@ use std::sync::{OnceLock, RwLock};
 use serde_json::{json, Value};
 
 use crate::server::core::providers::adapter::ModelRefreshOutcome;
+use crate::server::core::providers::catalog_cache;
 use crate::server::logging;
 
+use super::context;
 use super::cosy::{self, CosyIdentity};
 use super::credentials::Credentials;
 use super::endpoints::Region;
@@ -241,9 +243,29 @@ struct CatalogState {
     cn_fetched_at: i64,
 }
 
+/// 进程级目录句柄。首次初始化时**先从持久化缓存恢复**（两个地区各一份，
+/// 按地区分开的理由见模块头「为什么按地区分开缓存」），没有再留空 ——
+/// 空状态的读取语义就是「回落到静态兜底清单」。
 fn catalog() -> &'static RwLock<CatalogState> {
     static CATALOG: OnceLock<RwLock<CatalogState>> = OnceLock::new();
-    CATALOG.get_or_init(|| RwLock::new(CatalogState::default()))
+    CATALOG.get_or_init(|| RwLock::new(restored_state()))
+}
+
+/// 首次初始化读一次持久化缓存（见 `providers::catalog_cache` 的模块头）。
+///
+/// 缓存里存的就是 `CatalogState` 那两格的形态（`refresh` 落地的那份），
+/// 所以这里只做「搬回来」：不重新解析、也不重新归一。
+fn restored_state() -> CatalogState {
+    let mut state = CatalogState::default();
+    if let Some(cached) = catalog_cache::load(catalog_cache::SCOPE_QODER_GLOBAL) {
+        state.global = cached.models;
+        state.global_fetched_at = cached.fetched_at;
+    }
+    if let Some(cached) = catalog_cache::load(catalog_cache::SCOPE_QODER_CN) {
+        state.cn = cached.models;
+        state.cn_fetched_at = cached.fetched_at;
+    }
+    state
 }
 
 fn read_state() -> CatalogState {
@@ -430,14 +452,20 @@ pub async fn refresh(
     let count = models.len();
     let mut state = read_state();
     let now = logging::now_ms();
+    // 先落持久化缓存（进程重启后由 `restored_state` 读回）：只存刷新成功的
+    // 这一边，另一边的缓存原样留着（它有自己的刷新周期）。`state` 随后要被
+    // `write` 消费，所以缓存写在前面；**不在目录锁内** —— 缓存写入要拿库
+    // 连接锁，两把锁不能嵌套。
     match region {
         Region::Global => {
             state.global = models;
             state.global_fetched_at = now;
+            catalog_cache::save(catalog_cache::SCOPE_QODER_GLOBAL, &state.global, now);
         }
         Region::Cn => {
             state.cn = models;
             state.cn_fetched_at = now;
+            catalog_cache::save(catalog_cache::SCOPE_QODER_CN, &state.cn, now);
         }
     }
     match catalog().write() {
@@ -560,6 +588,19 @@ fn parse_catalog(payload: &Value) -> Vec<Value> {
                     }
                 }
             }
+            // 上下文档位（请求时按 prompt 估算升级，见 `context.rs`）：含上游**当前**
+            // 选中的那档（`max_input_tokens`）—— 升档判据要与它比，不能与最大档比。
+            if let Some(config) = object.get_mut("config").and_then(Value::as_object_mut) {
+                let tiers = context::tiers_from_catalog(item);
+                if !tiers.is_empty() {
+                    config.insert("tiers".to_string(), Value::Array(tiers));
+                }
+                if let Some(current) = item.get("max_input_tokens").and_then(Value::as_i64) {
+                    if current > 0 {
+                        config.insert("max_input_tokens".to_string(), Value::from(current));
+                    }
+                }
+            }
         }
         models.push(model);
     }
@@ -568,14 +609,7 @@ fn parse_catalog(payload: &Value) -> Vec<Value> {
 
 /// 上下文窗口：取 `context_config` 里各档位的最大 `token_count`（源实现同款）
 fn context_window_of(item: &Value) -> i64 {
-    let Some(config) = item.get("context_config").and_then(Value::as_object) else {
-        return DEFAULT_CONTEXT_WINDOW;
-    };
-    let max = config
-        .values()
-        .filter_map(|entry| entry.get("token_count").and_then(Value::as_i64))
-        .max()
-        .unwrap_or(0);
+    let max = context::max_tokens(&context::tiers_from_catalog(item));
     if max > 0 {
         max
     } else {

@@ -19,7 +19,6 @@
   padding-bottom: 0;
 }
 
-.page[data-page="settings"] .page-head { flex: none; }
 
 .settings-layout {
   flex: 1;
@@ -183,20 +182,6 @@
 
 .danger-zone strong { color: var(--danger); }
 
-/* ─── 出网代理表单（proxy-form.js 动态渲染）─── */
-.proxy-select { max-width: 240px; }
-
-/* 代理表单的自定义输入只按内容伸展，不要占满整行 */
-.field-row > .pf-host { flex: 0 1 180px; }
-.field-row > .pf-username,
-.field-row > .pf-password { flex: 0 1 150px; }
-
-/* 测试出口的结果里混着状态码、IP 与耗时，数字等宽才不会左右跳 */
-.pf-test-result {
-  word-break: break-word;
-  font-variant-numeric: tabular-nums;
-}
-
 /* ─── 软件更新 ─── */
 .update-version {
   display: flex;
@@ -275,7 +260,9 @@
   gap: 7px;
 }
 
-/* 覆盖 components.css 的 input[type=number]{max-width:130px}：这里要收窄到 92px，
+/* 覆盖 components.css 的 input[type=number]{max-width:130px}
+
+：这里要收窄到 92px，
    三行等宽；数字用等宽字形，改了位数一眼看得出来。数字居中 —— 与定时任务页的
    间隔框同一套处理（那里的注释解释了为什么居中不会被步进箭头推动）。 */
 .retention-input input[type="number"] {
@@ -287,6 +274,78 @@
 }
 
 .retention-input .unit { color: var(--text-3); font-size: 12px; }
+
+/* ─── 标签输入（GitHub Topics 同款）───
+   「指定错误码不重试」用：一排已添加的状态码徽章 + 一个行内输入框，
+   回车添加、点 ✕ 删除。整框是一个输入控件的观感 —— 点空白处也会聚焦
+   输入框（settings-panel.js 里有对应绑定），所以框自己要有聚焦描边。 */
+.tag-input {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 320px;
+  max-width: 100%;
+  min-height: 34px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md, 8px);
+  background: var(--surface);
+  cursor: text;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+.tag-input:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+.tag-input.disabled { opacity: .55; cursor: default; }
+.tag-input.disabled:focus-within { border-color: var(--border); box-shadow: none; }
+
+/* 徽章：状态码走等宽字形（与上面的数字框同一取向，位数变化一眼可见） */
+.tag-input .tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 4px 2px 9px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+/* 徽章上的 ✕：小号、圆角热区，悬停加深 —— 「能点删」的视觉暗示 */
+.tag-input .tag-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-3);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.tag-input .tag-x:hover { background: var(--danger-soft, rgba(220, 38, 38, .12)); color: var(--danger, #dc2626); }
+
+/* 行内输入框：无框无底色（框的描边由外层 .tag-input 出），吃掉剩余宽度 */
+.tag-input .tag-input-field {
+  flex: 1 1 120px;
+  min-width: 120px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  padding: 2px 0;
+}
+.tag-input .tag-input-field:disabled { background: transparent; }
 
 /* ─── 系统提示词（模式下拉 + 文件路径）───
    版式复用 .retention-row 的两列（定宽标签 + 输入），但输入不是「窄数字框」，
@@ -372,83 +431,3 @@
 @media (max-width: 900px) {
   .retention-row { grid-template-columns: max-content 1fr; }
 }
-
-/* ─── 转发路由（provider 路由优先级） ───
-   与 .retention-list 同一套版式（容器内嵌凹槽底 + 每行「标签定宽 + 输入紧随」+
-   说明另起一行），两处都是「一列同类数字框」，观感一致才好一起读。
-   标签列宽取 150px 而不是保留期那边的 118px：这里的标签是提供商名 + 账号数 +
-   「先试」标记，中文名最长到「CatPaw」这一档仍能一行放下，再长就折行，
-   不会叠到输入框上（与那边同样的取舍）。 */
-.route-list {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--surface-inset);
-}
-
-.route-row {
-  display: grid;
-  grid-template-columns: 150px auto;
-  align-items: center;
-  gap: 5px 10px;
-}
-
-.route-row > label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  color: var(--text);
-  font-size: 12.5px;
-  font-weight: 500;
-  line-height: 1.4;
-}
-
-/* 账号数：跟在提供商名后面的一句小字，比标签淡一档，不和名字抢视线 */
-.route-accounts {
-  flex: 0 0 auto;
-  color: var(--text-3);
-  font-size: 11px;
-  font-weight: 400;
-  font-variant-numeric: tabular-nums;
-}
-
-/* 「先试」标记：只有排第一的那家挂，是本页唯一需要一眼看到的结论 */
-.route-first {
-  flex: 0 0 auto;
-  padding: 1px 6px;
-  border-radius: var(--r-xs);
-  background: var(--primary-soft);
-  color: var(--primary-fg);
-  font-size: 10.5px;
-  font-weight: 600;
-}
-
-/* 覆盖 components.css 的 input[type=number]{max-width:130px}：与保留期同理，
-   各家等宽、左对齐，改位数时数字不左右跳 */
-.route-input input[type="number"] {
-  flex: 0 0 auto;
-  width: 92px;
-  max-width: 92px;
-  font-variant-numeric: tabular-nums;
-}
-
-/* 说明另起一行、占满整行（从标签左边缘开始，不必再缩进） */
-.route-row > .hint { grid-column: 1 / -1; }
-
-/* 窄窗口：与保留期同样放宽标签列，避免中文名挤成两行 */
-@media (max-width: 900px) {
-  .route-row { grid-template-columns: max-content 1fr; }
-}
-
-/* ─── 确认弹窗 ───
-   复用 .modal 外壳（components.css），只覆盖宽度：
-   这类框只有一段话加两个按钮，620px 太宽、文字会散开，收窄到 440px 更聚拢。
-   危险动作的样式不由这里负责 —— 确认键用既有的 button.danger。
-   升级结果原先也用它（弹窗展示逐项清单），改成自动升级 + toast 之后
-   不再需要 —— 这里只剩全站的危险操作确认框（confirm-dialog.js）。 */
-.modal-confirm { width: min(440px, 100%); }
-

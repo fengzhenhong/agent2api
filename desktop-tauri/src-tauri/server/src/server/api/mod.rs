@@ -12,6 +12,7 @@
 //!   stats_api.rs  GET /api/stats/summary、/api/stats/requests、DELETE /api/stats/requests、
 //!                 GET/PUT /api/retention
 //!   retry_api.rs  GET/PUT /api/retry（请求重试设置，转发层退避的次数 / 间隔）
+//!   queue_api.rs  GET/PUT /api/queue（排队等待：次数与单次时长）
 //!   accounts.rs   /api/accounts*（对照 workbuddy-account-routes.mjs）
 //!   proxies.rs    /api/proxies*（Clash 读取 + 出口测试）
 //!   billing.rs    积分 / 签到 / 运营活动（对照 workbuddy-billing.mjs + server.mjs 871-911 行）
@@ -44,8 +45,14 @@ pub mod config_api;
 // `core::custom_providers` 与 `core::account_store::custom_accounts`）
 pub mod custom_providers;
 pub mod debug_api;
+// 进行中行的断线兜底守卫（从 pipeline.rs 拆出：那边已近 1000 行，而它是
+// 「handler 被 axum 取消时补 408 终态」这一件事的完整封装，见该文件模块头）
+pub mod disconnect_guard;
 pub mod endpoints;
 pub mod health;
+// 「从其他工具导入」的扫描接口（当前来源：cc-switch；存储读取见
+// `core::import_ccswitch`）
+pub mod import_sources;
 pub mod keys_api;
 pub mod logs_api;
 pub mod model_manage;
@@ -55,11 +62,14 @@ pub mod pipeline;
 pub mod prompt;
 pub mod protocol;
 pub mod proxies;
+pub mod queue_api;
 pub mod retry_api;
 pub mod sanitize;
 pub mod scheduled_tasks;
 pub mod session;
 pub mod stats_api;
 pub mod storage_api;
+pub mod timeouts_api;
 pub mod update;
 pub mod upgrade_api;
+pub mod zcode_claim;
